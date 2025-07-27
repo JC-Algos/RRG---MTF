@@ -17,3 +17,4 @@ cryptg
 nest-asyncio
 streamlit_telegram_login
 streamlit-telegram-login==0.0.3
+xlsxwriter
