@@ -147,10 +147,10 @@ for tk in tickers:
             if not (pd.isna(w_rs) or pd.isna(w_rm) or pd.isna(d_rs) or pd.isna(d_rm)):
                 rows.append({
                     "Ticker": tk,
-                    "Weekly Q": quadrant(w_rs, w_rm),
+                    "Weekly Quadrant": quadrant(w_rs, w_rm),
                     "Weekly RS": w_rs,
                     "Weekly RM": w_rm,
-                    "Daily Q": quadrant(d_rs, d_rm),
+                    "Daily Quadrant": quadrant(d_rs, d_rm),
                     "Daily RS": d_rs,
                     "Daily RM": d_rm
                 })
@@ -166,7 +166,7 @@ if df.empty:
 
 # ---------- 5.  SORT BY WEEKLY QUADRANT ----------
 quad_order = {'Leading': 0, 'Improving': 1, 'Weakening': 2, 'Lagging': 3, 'No Data': 4}
-df = df.sort_values(by='Weekly Q', key=lambda x: x.map(quad_order))
+df = df.sort_values(by='Weekly Quadrant', key=lambda x: x.map(quad_order))
 
 # ---------- 6.  DISPLAY ----------
 st.subheader(f"{uni} rotation table  (bench: {bench})")
@@ -176,90 +176,110 @@ styled = df.style.applymap(
                "Weakening":"background-color:#FFFFE0",
                "Lagging":"background-color:#FFB6C1",
                "No Data":"background-color:#D3D3D3"}.get(v, ""),
-    subset=["Weekly Q", "Daily Q"]
+    subset=["Weekly Quadrant", "Daily Quadrant"]
 )
 st.dataframe(styled, use_container_width=True, height=600)
 
 # ---------- 7.  EXCEL DOWNLOAD ----------
 buffer = BytesIO()
 with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
-    # Write the dataframe to Excel
-    df.to_excel(writer, sheet_name="RRG", index=False)
+    # Write the dataframe to Excel starting at row 2 (3rd row)
+    df.to_excel(writer, sheet_name="RRG", index=False, startrow=2)
     
     # Get the xlsxwriter workbook and worksheet objects
     workbook = writer.book
     worksheet = writer.sheets['RRG']
     
-    # Define formats for different quadrants
-    leading_format = workbook.add_format({'bg_color': '#90EE90'})
-    improving_format = workbook.add_format({'bg_color': '#ADD8E6'})
-    weakening_format = workbook.add_format({'bg_color': '#FFFFE0'})
-    lagging_format = workbook.add_format({'bg_color': '#FFB6C1'})
-    no_data_format = workbook.add_format({'bg_color': '#D3D3D3'})
+    # Add timestamp at the first row
+    timestamp_format = workbook.add_format({'bold': True, 'font_size': 12})
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    worksheet.write(0, 0, f"RRG Analysis - Generated on: {current_time}", timestamp_format)
     
-    # Number format for RS values (2 decimal places)
-    number_format = workbook.add_format({'num_format': '0.00'})
-    leading_number = workbook.add_format({'bg_color': '#90EE90', 'num_format': '0.00'})
-    improving_number = workbook.add_format({'bg_color': '#ADD8E6', 'num_format': '0.00'})
-    weakening_number = workbook.add_format({'bg_color': '#FFFFE0', 'num_format': '0.00'})
-    lagging_number = workbook.add_format({'bg_color': '#FFB6C1', 'num_format': '0.00'})
-    no_data_number = workbook.add_format({'bg_color': '#D3D3D3', 'num_format': '0.00'})
+    # Define border format
+    border_format = workbook.add_format({'border': 1})
     
-    # Apply formatting to each row
-    for row_num in range(1, len(df) + 1):  # Start from 1 to skip header
-        weekly_q = df.iloc[row_num-1]['Weekly Q']
-        daily_q = df.iloc[row_num-1]['Daily Q']
+    # Define formats for different quadrants with borders
+    leading_format = workbook.add_format({'bg_color': '#90EE90', 'border': 1})
+    improving_format = workbook.add_format({'bg_color': '#ADD8E6', 'border': 1})
+    weakening_format = workbook.add_format({'bg_color': '#FFFFE0', 'border': 1})
+    lagging_format = workbook.add_format({'bg_color': '#FFB6C1', 'border': 1})
+    no_data_format = workbook.add_format({'bg_color': '#D3D3D3', 'border': 1})
+    
+    # Number format for RS values (2 decimal places) with borders
+    leading_number = workbook.add_format({'bg_color': '#90EE90', 'num_format': '0.00', 'border': 1})
+    improving_number = workbook.add_format({'bg_color': '#ADD8E6', 'num_format': '0.00', 'border': 1})
+    weakening_number = workbook.add_format({'bg_color': '#FFFFE0', 'num_format': '0.00', 'border': 1})
+    lagging_number = workbook.add_format({'bg_color': '#FFB6C1', 'num_format': '0.00', 'border': 1})
+    no_data_number = workbook.add_format({'bg_color': '#D3D3D3', 'num_format': '0.00', 'border': 1})
+    
+    # Header format with borders
+    header_format = workbook.add_format({'bold': True, 'bg_color': '#D3D3D3', 'border': 1})
+    
+    # Apply border formatting to headers (row 2, which is index 2)
+    for col in range(len(df.columns)):
+        worksheet.write(2, col, df.columns[col], header_format)
+    
+    # Apply border formatting to ticker column (no background color)
+    ticker_format = workbook.add_format({'border': 1})
+    for row_num in range(len(df)):
+        worksheet.write(row_num + 3, 0, df.iloc[row_num]['Ticker'], ticker_format)
+    
+    # Apply formatting to each data row (starting from row 3, which is index 3)
+    for row_num in range(len(df)):
+        excel_row = row_num + 3  # Offset by 3 because we start at row 3 (index 2 is header)
+        weekly_q = df.iloc[row_num]['Weekly Quadrant']
+        daily_q = df.iloc[row_num]['Daily Quadrant']
         
         # Format Weekly Quadrant column (column 1)
         if weekly_q == 'Leading':
-            worksheet.write(row_num, 1, weekly_q, leading_format)
-            worksheet.write(row_num, 2, df.iloc[row_num-1]['Weekly RS'], leading_number)
-            worksheet.write(row_num, 3, df.iloc[row_num-1]['Weekly RM'], leading_number)
+            worksheet.write(excel_row, 1, weekly_q, leading_format)
+            worksheet.write(excel_row, 2, df.iloc[row_num]['Weekly RS'], leading_number)
+            worksheet.write(excel_row, 3, df.iloc[row_num]['Weekly RM'], leading_number)
         elif weekly_q == 'Improving':
-            worksheet.write(row_num, 1, weekly_q, improving_format)
-            worksheet.write(row_num, 2, df.iloc[row_num-1]['Weekly RS'], improving_number)
-            worksheet.write(row_num, 3, df.iloc[row_num-1]['Weekly RM'], improving_number)
+            worksheet.write(excel_row, 1, weekly_q, improving_format)
+            worksheet.write(excel_row, 2, df.iloc[row_num]['Weekly RS'], improving_number)
+            worksheet.write(excel_row, 3, df.iloc[row_num]['Weekly RM'], improving_number)
         elif weekly_q == 'Weakening':
-            worksheet.write(row_num, 1, weekly_q, weakening_format)
-            worksheet.write(row_num, 2, df.iloc[row_num-1]['Weekly RS'], weakening_number)
-            worksheet.write(row_num, 3, df.iloc[row_num-1]['Weekly RM'], weakening_number)
+            worksheet.write(excel_row, 1, weekly_q, weakening_format)
+            worksheet.write(excel_row, 2, df.iloc[row_num]['Weekly RS'], weakening_number)
+            worksheet.write(excel_row, 3, df.iloc[row_num]['Weekly RM'], weakening_number)
         elif weekly_q == 'Lagging':
-            worksheet.write(row_num, 1, weekly_q, lagging_format)
-            worksheet.write(row_num, 2, df.iloc[row_num-1]['Weekly RS'], lagging_number)
-            worksheet.write(row_num, 3, df.iloc[row_num-1]['Weekly RM'], lagging_number)
+            worksheet.write(excel_row, 1, weekly_q, lagging_format)
+            worksheet.write(excel_row, 2, df.iloc[row_num]['Weekly RS'], lagging_number)
+            worksheet.write(excel_row, 3, df.iloc[row_num]['Weekly RM'], lagging_number)
         else:
-            worksheet.write(row_num, 1, weekly_q, no_data_format)
-            worksheet.write(row_num, 2, df.iloc[row_num-1]['Weekly RS'], no_data_number)
-            worksheet.write(row_num, 3, df.iloc[row_num-1]['Weekly RM'], no_data_number)
+            worksheet.write(excel_row, 1, weekly_q, no_data_format)
+            worksheet.write(excel_row, 2, df.iloc[row_num]['Weekly RS'], no_data_number)
+            worksheet.write(excel_row, 3, df.iloc[row_num]['Weekly RM'], no_data_number)
         
         # Format Daily Quadrant column (column 4)
         if daily_q == 'Leading':
-            worksheet.write(row_num, 4, daily_q, leading_format)
-            worksheet.write(row_num, 5, df.iloc[row_num-1]['Daily RS'], leading_number)
-            worksheet.write(row_num, 6, df.iloc[row_num-1]['Daily RM'], leading_number)
+            worksheet.write(excel_row, 4, daily_q, leading_format)
+            worksheet.write(excel_row, 5, df.iloc[row_num]['Daily RS'], leading_number)
+            worksheet.write(excel_row, 6, df.iloc[row_num]['Daily RM'], leading_number)
         elif daily_q == 'Improving':
-            worksheet.write(row_num, 4, daily_q, improving_format)
-            worksheet.write(row_num, 5, df.iloc[row_num-1]['Daily RS'], improving_number)
-            worksheet.write(row_num, 6, df.iloc[row_num-1]['Daily RM'], improving_number)
+            worksheet.write(excel_row, 4, daily_q, improving_format)
+            worksheet.write(excel_row, 5, df.iloc[row_num]['Daily RS'], improving_number)
+            worksheet.write(excel_row, 6, df.iloc[row_num]['Daily RM'], improving_number)
         elif daily_q == 'Weakening':
-            worksheet.write(row_num, 4, daily_q, weakening_format)
-            worksheet.write(row_num, 5, df.iloc[row_num-1]['Daily RS'], weakening_number)
-            worksheet.write(row_num, 6, df.iloc[row_num-1]['Daily RM'], weakening_number)
+            worksheet.write(excel_row, 4, daily_q, weakening_format)
+            worksheet.write(excel_row, 5, df.iloc[row_num]['Daily RS'], weakening_number)
+            worksheet.write(excel_row, 6, df.iloc[row_num]['Daily RM'], weakening_number)
         elif daily_q == 'Lagging':
-            worksheet.write(row_num, 4, daily_q, lagging_format)
-            worksheet.write(row_num, 5, df.iloc[row_num-1]['Daily RS'], lagging_number)
-            worksheet.write(row_num, 6, df.iloc[row_num-1]['Daily RM'], lagging_number)
+            worksheet.write(excel_row, 4, daily_q, lagging_format)
+            worksheet.write(excel_row, 5, df.iloc[row_num]['Daily RS'], lagging_number)
+            worksheet.write(excel_row, 6, df.iloc[row_num]['Daily RM'], lagging_number)
         else:
-            worksheet.write(row_num, 4, daily_q, no_data_format)
-            worksheet.write(row_num, 5, df.iloc[row_num-1]['Daily RS'], no_data_number)
-            worksheet.write(row_num, 6, df.iloc[row_num-1]['Daily RM'], no_data_number)
+            worksheet.write(excel_row, 4, daily_q, no_data_format)
+            worksheet.write(excel_row, 5, df.iloc[row_num]['Daily RS'], no_data_number)
+            worksheet.write(excel_row, 6, df.iloc[row_num]['Daily RM'], no_data_number)
     
     # Auto-adjust column widths
     worksheet.set_column('A:A', 15)  # Ticker
-    worksheet.set_column('B:B', 12)  # Weekly Q
+    worksheet.set_column('B:B', 18)  # Weekly Quadrant
     worksheet.set_column('C:C', 12)  # Weekly RS
     worksheet.set_column('D:D', 15)  # Weekly RM
-    worksheet.set_column('E:E', 12)  # Daily Q
+    worksheet.set_column('E:E', 16)  # Daily Quadrant
     worksheet.set_column('F:F', 12)  # Daily RS
     worksheet.set_column('G:G', 15)  # Daily RM
 
