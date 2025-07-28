@@ -190,10 +190,10 @@ with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
     workbook = writer.book
     worksheet = writer.sheets['RRG']
     
-    # Add timestamp at the first row
+    # Add timestamp at the first row (GMT+8)
     timestamp_format = workbook.add_format({'bold': True, 'font_size': 12})
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    worksheet.write(0, 0, f"RRG Analysis - Generated on: {current_time}", timestamp_format)
+    current_time = (datetime.now() + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
+    worksheet.write(0, 0, f"RRG Analysis - Generated on: {current_time} (GMT+8)", timestamp_format)
     
     # Define border format
     border_format = workbook.add_format({'border': 1})
