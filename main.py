@@ -50,25 +50,77 @@ def fetch(universe):
     end = datetime.today()
     w_end = end - timedelta(hours=4)
     w_start = w_end - timedelta(weeks=100)
+    
+    # Fetch data
     weekly = yf.download(tickers, start=w_start, end=w_end, progress=False)["Close"].resample("W-FRI").last()
     daily  = yf.download(tickers, start=w_end-timedelta(days=500), end=w_end, progress=False)["Close"]
+    
+    # Clean data properly - forward fill then backward fill to handle missing values
+    weekly = weekly.fillna(method='ffill').fillna(method='bfill')
+    daily = daily.fillna(method='ffill').fillna(method='bfill')
+    
+    # Only drop columns that are completely empty after filling
     weekly = weekly.dropna(axis=1, how="all")
-    daily  = daily.dropna(axis=1, how="all")
+    daily = daily.dropna(axis=1, how="all")
+    
     return weekly, daily, cfg["bench"]
 
 # ---------- 3.  RRG ----------
-def ma(s, n): return s.rolling(n).mean()
+def ma(s, n): 
+    """Simple moving average with proper NaN handling"""
+    if n == 1:
+        return s  # No need to calculate rolling mean for period 1
+    return s.rolling(n, min_periods=1).mean()
 
 def rs_rm(sym, bench, data):
-    base = data[sym] / data[bench]
-    rs = 100 * (ma(base, 10) / ma(base, 26) - 1) + 100
-    rm = 100 * (ma(rs, 1)  / ma(rs, 4)  - 1) + 100
-    return rs.iloc[-1], rm.iloc[-1]
+    """Calculate RS-Ratio and RS-Momentum with proper data alignment"""
+    # Ensure both series are aligned and handle missing data
+    sym_data = data[sym].dropna()
+    bench_data = data[bench].dropna()
+    
+    # Align the data by common index
+    common_index = sym_data.index.intersection(bench_data.index)
+    if len(common_index) < 30:  # Need minimum data points
+        return np.nan, np.nan
+    
+    sym_aligned = sym_data.reindex(common_index)
+    bench_aligned = bench_data.reindex(common_index)
+    
+    # Calculate base ratio with zero division protection
+    base = sym_aligned / bench_aligned
+    base = base.replace([np.inf, -np.inf], np.nan).dropna()
+    
+    if len(base) < 30:  # Need minimum data points for moving averages
+        return np.nan, np.nan
+    
+    # Calculate RS-Ratio (matches Pine Script logic exactly)
+    rs1 = ma(base, 10)
+    rs2 = ma(base, 26)
+    
+    # Avoid division by zero
+    rs2_safe = rs2.replace(0, np.nan)
+    rs_ratio = 100 * ((rs1 - rs2_safe) / rs2_safe + 1)
+    
+    # Calculate RS-Momentum (matches Pine Script logic exactly) 
+    rm1 = ma(rs_ratio, 1)  # This is just rs_ratio itself
+    rm2 = ma(rs_ratio, 4)
+    
+    # Avoid division by zero
+    rm2_safe = rm2.replace(0, np.nan)
+    rs_momentum = 100 * ((rm1 - rm2_safe) / rm2_safe + 1)
+    
+    # Return the last valid values
+    rs_final = rs_ratio.dropna().iloc[-1] if not rs_ratio.dropna().empty else np.nan
+    rm_final = rs_momentum.dropna().iloc[-1] if not rs_momentum.dropna().empty else np.nan
+    
+    return rs_final, rm_final
 
 def quadrant(x, y):
+    if pd.isna(x) or pd.isna(y):
+        return "No Data"
     if x >= 100 and y >= 100: return "Leading"
-    if x >= 100 and y < 100:  return "Improving"
-    if x < 100  and y >= 100: return "Weakening"
+    if x >= 100 and y < 100:  return "Weakening"
+    if x < 100  and y >= 100: return "Improving"
     return "Lagging"
 
 # ---------- 4.  UI ----------
@@ -76,29 +128,39 @@ st.sidebar.title("Universe")
 uni = st.sidebar.radio("Choose universe", list(UNIVERSE_MAP.keys()), index=0)
 
 weekly, daily, bench = fetch(uni)
-tickers = [c for c in weekly.columns if c != bench]
+tickers = [c for c in weekly.columns if c != bench and c in daily.columns]
 
 rows = []
 for tk in tickers:
     try:
-        w_rs, w_rm = rs_rm(tk, bench, weekly)
-        d_rs, d_rm = rs_rm(tk, bench, daily)
-        rows.append({
-            "Ticker": tk,
-            "Weekly Q": quadrant(w_rs, w_rm),
-            "Weekly RS": round(w_rs, 2),
-            "Weekly RM": round(w_rm, 2),
-            "Daily Q": quadrant(d_rs, d_rm),
-            "Daily RS": round(d_rs, 2),
-            "Daily RM": round(d_rm, 2)
-        })
-    except Exception:
-        pass
+        # Only process tickers that exist in both datasets
+        if tk in weekly.columns and tk in daily.columns and bench in weekly.columns and bench in daily.columns:
+            w_rs, w_rm = rs_rm(tk, bench, weekly)
+            d_rs, d_rm = rs_rm(tk, bench, daily)
+            
+            # Only add to results if we have valid data
+            if not (pd.isna(w_rs) or pd.isna(w_rm) or pd.isna(d_rs) or pd.isna(d_rm)):
+                rows.append({
+                    "Ticker": tk,
+                    "Weekly Q": quadrant(w_rs, w_rm),
+                    "Weekly RS": round(float(w_rs), 2),
+                    "Weekly RM": round(float(w_rm), 2),
+                    "Daily Q": quadrant(d_rs, d_rm),
+                    "Daily RS": round(float(d_rs), 2),
+                    "Daily RM": round(float(d_rm), 2)
+                })
+    except Exception as e:
+        st.sidebar.write(f"Error processing {tk}: {str(e)}")
+        continue
 
 df = pd.DataFrame(rows)
 
+if df.empty:
+    st.error("No valid data available. Please check your data source and try again.")
+    st.stop()
+
 # ---------- 5.  SORT BY WEEKLY QUADRANT ----------
-quad_order = {'Leading': 0, 'Improving': 1, 'Weakening': 2, 'Lagging': 3}
+quad_order = {'Leading': 0, 'Improving': 1, 'Weakening': 2, 'Lagging': 3, 'No Data': 4}
 df = df.sort_values(by='Weekly Q', key=lambda x: x.map(quad_order))
 
 # ---------- 6.  DISPLAY ----------
@@ -107,7 +169,8 @@ styled = df.style.applymap(
     lambda v: {"Leading":"background-color:#90EE90",
                "Improving":"background-color:#ADD8E6",
                "Weakening":"background-color:#FFFFE0",
-               "Lagging":"background-color:#FFB6C1"}.get(v, ""),
+               "Lagging":"background-color:#FFB6C1",
+               "No Data":"background-color:#D3D3D3"}.get(v, ""),
     subset=["Weekly Q", "Daily Q"]
 )
 st.dataframe(styled, use_container_width=True, height=600)
