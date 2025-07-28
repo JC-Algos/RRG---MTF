@@ -31,7 +31,7 @@ US_TICKERS = ["AAPL", "ABBV", "ABNB", "ABSV", "ABT", "ACN", "ADBE", "ADP", "ADSK
               "TMO", "TRV", "TSLA", "TSM", "TTD", "TTWO", "TXN", "TEAM", "ULTA", "UNH", 
               "UNP", "UPS", "V", "VLO", "VMO", "VST", "VZ", "WDH", "WMB", "WMT", "WRTC", 
               "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY", 
-              "XOM", "YUM", "ZS"]
+              "XOM", "YUM", "ZS", "BX", "COIN"]
 
 HK_TICKERS = ["0001.HK","0002.HK","0003.HK","0005.HK","0006.HK","0011.HK","0012.HK","0016.HK",
               "0017.HK","0019.HK","0020.HK","0027.HK","0066.HK","0101.HK","0140.HK","0144.HK",
