@@ -1,14 +1,5 @@
+# rrg_mini.py
 import streamlit as st
-import os
-import sys
-
-# CRITICAL FIX: Must disable multitasking BEFORE importing yfinance
-os.environ['YFINANCE_MULTITHREADING'] = '0'
-
-# Monkeypatch multitasking to be non-threaded
-import multitasking
-multitasking.set_max_threads(1)
-
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -98,24 +89,19 @@ def fetch(universe):
     w_end = end - timedelta(hours=4)
     w_start = w_end - timedelta(weeks=100)
     
-    try:
-        # Fetch data - should now work with threading disabled
-        weekly = yf.download(tickers, start=w_start, end=w_end, progress=False)["Close"].resample("W-FRI").last()
-        daily  = yf.download(tickers, start=w_end-timedelta(days=500), end=w_end, progress=False)["Close"]
-        
-        # Clean data properly
-        weekly = weekly.ffill().bfill()
-        daily = daily.ffill().bfill()
-        
-        # Only drop columns that are completely empty after filling
-        weekly = weekly.dropna(axis=1, how="all")
-        daily = daily.dropna(axis=1, how="all")
-        
-        return weekly, daily, cfg["bench"]
-    except Exception as e:
-        st.error(f"Error fetching data: {str(e)}")
-        # Return empty dataframes if download fails
-        return pd.DataFrame(), pd.DataFrame(), cfg["bench"]
+    # Fetch data
+    weekly = yf.download(tickers, start=w_start, end=w_end, progress=False)["Close"].resample("W-FRI").last()
+    daily  = yf.download(tickers, start=w_end-timedelta(days=500), end=w_end, progress=False)["Close"]
+    
+    # Clean data properly - forward fill then backward fill to handle missing values
+    weekly = weekly.fillna(method='ffill').fillna(method='bfill')
+    daily = daily.fillna(method='ffill').fillna(method='bfill')
+    
+    # Only drop columns that are completely empty after filling
+    weekly = weekly.dropna(axis=1, how="all")
+    daily = daily.dropna(axis=1, how="all")
+    
+    return weekly, daily, cfg["bench"]
 
 # ---------- 3.  RRG ----------
 def ma(s, n): 
@@ -184,14 +170,7 @@ if st.sidebar.button("🔄 Refresh Data"):
     st.cache_data.clear()
     st.rerun()
 
-# Show loading message
-with st.spinner(f'Fetching {uni} data... This may take a moment.'):
-    weekly, daily, bench = fetch(uni)
-
-# Check if data loaded successfully
-if weekly.empty or daily.empty:
-    st.error("Failed to load data. Please try refreshing the page or selecting a different universe.")
-    st.stop()
+weekly, daily, bench = fetch(uni)
 tickers = [c for c in weekly.columns if c != bench and c in daily.columns]
 
 rows = []
@@ -229,9 +208,7 @@ df = df.sort_values(by='Weekly Quadrant', key=lambda x: x.map(quad_order))
 
 # ---------- 6.  DISPLAY ----------
 st.subheader(f"{uni} rotation table  (bench: {bench})")
-
-# ONLY FIX: use map() instead of deprecated applymap()
-styled = df.style.map(
+styled = df.style.applymap(
     lambda v: {"Leading":"background-color:#90EE90",
                "Improving":"background-color:#ADD8E6",
                "Weakening":"background-color:#FFFFE0",
