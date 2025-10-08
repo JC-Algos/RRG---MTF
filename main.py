@@ -216,8 +216,9 @@ if st.sidebar.button("🔄 Refresh Data"):
     st.cache_data.clear()
     st.rerun()
 
-# Fetch data (progress shown inside fetch function)
-weekly, daily, bench = fetch(uni)
+# Show loading message
+with st.spinner(f'Fetching {uni} data... This may take a moment.'):
+    weekly, daily, bench = fetch(uni)
 
 # Check if data loaded successfully
 if weekly.empty or daily.empty:
