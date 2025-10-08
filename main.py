@@ -1,4 +1,3 @@
-# rrg_mini.py
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -89,19 +88,23 @@ def fetch(universe):
     w_end = end - timedelta(hours=4)
     w_start = w_end - timedelta(weeks=100)
     
-    # Fetch data
-    weekly = yf.download(tickers, start=w_start, end=w_end, progress=False)["Close"].resample("W-FRI").last()
-    daily  = yf.download(tickers, start=w_end-timedelta(days=500), end=w_end, progress=False)["Close"]
-    
-    # Clean data properly - forward fill then backward fill to handle missing values
-    weekly = weekly.fillna(method='ffill').fillna(method='bfill')
-    daily = daily.fillna(method='ffill').fillna(method='bfill')
-    
-    # Only drop columns that are completely empty after filling
-    weekly = weekly.dropna(axis=1, how="all")
-    daily = daily.dropna(axis=1, how="all")
-    
-    return weekly, daily, cfg["bench"]
+    try:
+        # Fetch data with threading disabled to avoid multithreading issues
+        weekly = yf.download(tickers, start=w_start, end=w_end, progress=False, threads=False)["Close"].resample("W-FRI").last()
+        daily  = yf.download(tickers, start=w_end-timedelta(days=500), end=w_end, progress=False, threads=False)["Close"]
+        
+        # Clean data properly - use ffill() and bfill() instead of deprecated fillna(method=...)
+        weekly = weekly.ffill().bfill()
+        daily = daily.ffill().bfill()
+        
+        # Only drop columns that are completely empty after filling
+        weekly = weekly.dropna(axis=1, how="all")
+        daily = daily.dropna(axis=1, how="all")
+        
+        return weekly, daily, cfg["bench"]
+    except Exception as e:
+        st.error(f"Error fetching data: {str(e)}")
+        raise
 
 # ---------- 3.  RRG ----------
 def ma(s, n): 
@@ -208,14 +211,19 @@ df = df.sort_values(by='Weekly Quadrant', key=lambda x: x.map(quad_order))
 
 # ---------- 6.  DISPLAY ----------
 st.subheader(f"{uni} rotation table  (bench: {bench})")
-styled = df.style.applymap(
-    lambda v: {"Leading":"background-color:#90EE90",
-               "Improving":"background-color:#ADD8E6",
-               "Weakening":"background-color:#FFFFE0",
-               "Lagging":"background-color:#FFB6C1",
-               "No Data":"background-color:#D3D3D3"}.get(v, ""),
-    subset=["Weekly Quadrant", "Daily Quadrant"]
-)
+
+# Use map instead of applymap (deprecated in pandas 2.1+)
+def style_quadrant(v):
+    color_map = {
+        "Leading": "background-color:#90EE90",
+        "Improving": "background-color:#ADD8E6",
+        "Weakening": "background-color:#FFFFE0",
+        "Lagging": "background-color:#FFB6C1",
+        "No Data": "background-color:#D3D3D3"
+    }
+    return color_map.get(v, "")
+
+styled = df.style.map(style_quadrant, subset=["Weekly Quadrant", "Daily Quadrant"])
 st.dataframe(styled, use_container_width=True, height=600)
 
 # ---------- 7.  EXCEL DOWNLOAD ----------
