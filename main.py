@@ -4,7 +4,6 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from io import BytesIO
-import time
 
 st.set_page_config(layout="wide", page_title="RRG – World / US / HK")
 
@@ -77,132 +76,68 @@ UNIVERSE_MAP = {
     "HK":    {"tickers": HK_TICKERS,    "bench": "^HSI"}
 }
 
-# ---------- 2.  DATA DOWNLOAD WITH BATCH PROCESSING ----------
-def download_in_batches(tickers, start, end, batch_size=50):
-    """Download data in batches to avoid overwhelming yfinance"""
-    all_data = {}
-    failed_tickers = []
-    
-    for i in range(0, len(tickers), batch_size):
-        batch = tickers[i:i+batch_size]
-        try:
-            # Download with timeout and error handling
-            data = yf.download(
-                batch,
-                start=start,
-                end=end,
-                progress=False,
-                threads=False,
-                show_errors=False,
-                timeout=10
-            )
-            
-            # Handle the result carefully
-            if data is not None and not data.empty:
-                if "Close" in data.columns:
-                    close_data = data["Close"]
-                else:
-                    close_data = data
-                    
-                # Store each ticker's data
-                if isinstance(close_data, pd.Series):
-                    all_data[batch[0]] = close_data
-                elif isinstance(close_data, pd.DataFrame):
-                    for ticker in close_data.columns:
-                        if not close_data[ticker].isna().all():
-                            all_data[ticker] = close_data[ticker]
-            
-            # Small delay between batches
-            time.sleep(0.5)
-            
-        except Exception as e:
-            failed_tickers.extend(batch)
-            continue
-    
-    # Combine all data into a single DataFrame
-    if all_data:
-        combined_df = pd.DataFrame(all_data)
-        return combined_df, failed_tickers
-    else:
-        return pd.DataFrame(), failed_tickers
-
-@st.cache_data(ttl=3600, show_spinner=False)
+# ---------- 2.  DATA ----------
+@st.cache_data(ttl=3600)
 def fetch(universe):
-    """Fetch and process data with robust error handling"""
     cfg = UNIVERSE_MAP[universe]
-    all_tickers = [cfg["bench"]] + cfg["tickers"]
-    
+    tickers = [cfg["bench"]] + cfg["tickers"]
     end = datetime.today()
     w_end = end - timedelta(hours=4)
     w_start = w_end - timedelta(weeks=100)
-    d_start = w_end - timedelta(days=500)
     
-    # Download data in batches
-    weekly_raw, w_failed = download_in_batches(all_tickers, w_start, w_end)
-    daily_raw, d_failed = download_in_batches(all_tickers, d_start, w_end)
+    # Fetch data - removed threads parameter as it may not be supported in all versions
+    weekly = yf.download(tickers, start=w_start, end=w_end, progress=False)["Close"].resample("W-FRI").last()
+    daily  = yf.download(tickers, start=w_end-timedelta(days=500), end=w_end, progress=False)["Close"]
     
-    if weekly_raw.empty or daily_raw.empty:
-        raise ValueError("Unable to fetch any data from Yahoo Finance")
-    
-    # Process weekly data
-    weekly = weekly_raw.resample("W-FRI").last()
+    # Clean data properly - fixed deprecated pandas methods
     weekly = weekly.ffill().bfill()
+    daily = daily.ffill().bfill()
+    
+    # Only drop columns that are completely empty after filling
     weekly = weekly.dropna(axis=1, how="all")
-    
-    # Process daily data  
-    daily = daily_raw.ffill().bfill()
     daily = daily.dropna(axis=1, how="all")
-    
-    # Verify benchmark exists
-    if cfg["bench"] not in weekly.columns:
-        raise ValueError(f"Benchmark {cfg['bench']} not available in data")
-    if cfg["bench"] not in daily.columns:
-        raise ValueError(f"Benchmark {cfg['bench']} not available in daily data")
     
     return weekly, daily, cfg["bench"]
 
-# ---------- 3.  RRG CALCULATIONS ----------
+# ---------- 3.  RRG ----------
 def ma(s, n): 
-    """Simple moving average"""
+    """Simple moving average with proper NaN handling"""
     if n == 1:
         return s
     return s.rolling(n, min_periods=1).mean()
 
 def rs_rm(sym, bench, data):
-    """Calculate RS-Ratio and RS-Momentum"""
-    try:
-        sym_data = data[sym].dropna()
-        bench_data = data[bench].dropna()
-        
-        common_index = sym_data.index.intersection(bench_data.index)
-        if len(common_index) < 30:
-            return np.nan, np.nan
-        
-        sym_aligned = sym_data.reindex(common_index)
-        bench_aligned = bench_data.reindex(common_index)
-        
-        base = sym_aligned / bench_aligned
-        base = base.replace([np.inf, -np.inf], np.nan).dropna()
-        
-        if len(base) < 30:
-            return np.nan, np.nan
-        
-        rs1 = ma(base, 10)
-        rs2 = ma(base, 26)
-        rs2_safe = rs2.replace(0, np.nan)
-        rs_ratio = 100 * ((rs1 - rs2_safe) / rs2_safe + 1)
-        
-        rm1 = ma(rs_ratio, 1)
-        rm2 = ma(rs_ratio, 4)
-        rm2_safe = rm2.replace(0, np.nan)
-        rs_momentum = 100 * ((rm1 - rm2_safe) / rm2_safe + 1)
-        
-        rs_final = round(rs_ratio.dropna().iloc[-1], 2) if not rs_ratio.dropna().empty else np.nan
-        rm_final = round(rs_momentum.dropna().iloc[-1], 2) if not rs_momentum.dropna().empty else np.nan
-        
-        return rs_final, rm_final
-    except:
+    """Calculate RS-Ratio and RS-Momentum with proper data alignment"""
+    sym_data = data[sym].dropna()
+    bench_data = data[bench].dropna()
+    
+    common_index = sym_data.index.intersection(bench_data.index)
+    if len(common_index) < 30:
         return np.nan, np.nan
+    
+    sym_aligned = sym_data.reindex(common_index)
+    bench_aligned = bench_data.reindex(common_index)
+    
+    base = sym_aligned / bench_aligned
+    base = base.replace([np.inf, -np.inf], np.nan).dropna()
+    
+    if len(base) < 30:
+        return np.nan, np.nan
+    
+    rs1 = ma(base, 10)
+    rs2 = ma(base, 26)
+    rs2_safe = rs2.replace(0, np.nan)
+    rs_ratio = 100 * ((rs1 - rs2_safe) / rs2_safe + 1)
+    
+    rm1 = ma(rs_ratio, 1)
+    rm2 = ma(rs_ratio, 4)
+    rm2_safe = rm2.replace(0, np.nan)
+    rs_momentum = 100 * ((rm1 - rm2_safe) / rm2_safe + 1)
+    
+    rs_final = round(rs_ratio.dropna().iloc[-1], 2) if not rs_ratio.dropna().empty else np.nan
+    rm_final = round(rs_momentum.dropna().iloc[-1], 2) if not rs_momentum.dropna().empty else np.nan
+    
+    return rs_final, rm_final
 
 def quadrant(x, y):
     if pd.isna(x) or pd.isna(y):
@@ -213,39 +148,20 @@ def quadrant(x, y):
     return "Lagging"
 
 # ---------- 4.  UI ----------
-st.sidebar.title("Universe Selection")
+st.sidebar.title("Universe")
 uni = st.sidebar.radio("Choose universe", list(UNIVERSE_MAP.keys()), index=0)
 
 if st.sidebar.button("🔄 Refresh Data"):
     st.cache_data.clear()
     st.rerun()
 
-# Fetch data with progress indicator
-with st.spinner(f'Fetching {uni} data... This may take a minute.'):
-    try:
-        weekly, daily, bench = fetch(uni)
-    except Exception as e:
-        st.error(f"❌ Data fetch failed: {str(e)}")
-        st.info("💡 Try refreshing the page or selecting a different universe")
-        st.stop()
-
-# Get valid tickers
+weekly, daily, bench = fetch(uni)
 tickers = [c for c in weekly.columns if c != bench and c in daily.columns]
 
-if not tickers:
-    st.error("No valid tickers found in the data")
-    st.stop()
-
-# Process data
-progress_bar = st.progress(0)
-status_text = st.empty()
-
 rows = []
-total = len(tickers)
-
-for idx, tk in enumerate(tickers):
+for tk in tickers:
     try:
-        if tk in weekly.columns and tk in daily.columns:
+        if tk in weekly.columns and tk in daily.columns and bench in weekly.columns and bench in daily.columns:
             w_rs, w_rm = rs_rm(tk, bench, weekly)
             d_rs, d_rm = rs_rm(tk, bench, daily)
             
@@ -261,57 +177,32 @@ for idx, tk in enumerate(tickers):
                 })
     except:
         continue
-    
-    # Update progress
-    progress = (idx + 1) / total
-    progress_bar.progress(progress)
-    status_text.text(f"Processing: {idx + 1}/{total} tickers")
 
-progress_bar.empty()
-status_text.empty()
-
-# Create dataframe
 df = pd.DataFrame(rows)
 
 if df.empty:
-    st.error("No valid data after processing")
+    st.error("No valid data available. Please check your data source and try again.")
     st.stop()
 
-# ---------- 5.  SORT AND DISPLAY ----------
+# ---------- 5.  SORT BY WEEKLY QUADRANT ----------
 quad_order = {'Leading': 0, 'Improving': 1, 'Weakening': 2, 'Lagging': 3, 'No Data': 4}
 df = df.sort_values(by='Weekly Quadrant', key=lambda x: x.map(quad_order))
 
-st.subheader(f"{uni} Rotation Table (Benchmark: {bench})")
+# ---------- 6.  DISPLAY ----------
+st.subheader(f"{uni} rotation table  (bench: {bench})")
 
-# Summary metrics
-col1, col2, col3, col4 = st.columns(4)
-quad_counts = df['Weekly Quadrant'].value_counts()
-with col1:
-    st.metric("🟢 Leading", quad_counts.get('Leading', 0))
-with col2:
-    st.metric("🔵 Improving", quad_counts.get('Improving', 0))
-with col3:
-    st.metric("🟡 Weakening", quad_counts.get('Weakening', 0))
-with col4:
-    st.metric("🔴 Lagging", quad_counts.get('Lagging', 0))
-
-# Style and display
+# Fixed deprecated applymap to map
 def style_quadrant(v):
-    colors = {
-        "Leading": "background-color:#90EE90",
-        "Improving": "background-color:#ADD8E6",
-        "Weakening": "background-color:#FFFFE0",
-        "Lagging": "background-color:#FFB6C1",
-        "No Data": "background-color:#D3D3D3"
-    }
-    return colors.get(v, "")
+    return {"Leading":"background-color:#90EE90",
+            "Improving":"background-color:#ADD8E6",
+            "Weakening":"background-color:#FFFFE0",
+            "Lagging":"background-color:#FFB6C1",
+            "No Data":"background-color:#D3D3D3"}.get(v, "")
 
 styled = df.style.map(style_quadrant, subset=["Weekly Quadrant", "Daily Quadrant"])
 st.dataframe(styled, use_container_width=True, height=600)
 
-st.success(f"✅ Successfully processed {len(df)} tickers")
-
-# ---------- 6.  EXCEL DOWNLOAD ----------
+# ---------- 7.  EXCEL DOWNLOAD ----------
 buffer = BytesIO()
 with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
     df.to_excel(writer, sheet_name="RRG", index=False, startrow=2)
@@ -319,67 +210,89 @@ with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
     workbook = writer.book
     worksheet = writer.sheets['RRG']
     
-    # Timestamp
     timestamp_format = workbook.add_format({'bold': True, 'font_size': 12})
     current_time = (datetime.now() + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
-    worksheet.write(0, 0, f"RRG Analysis - Generated: {current_time} (GMT+8)", timestamp_format)
+    worksheet.write(0, 0, f"RRG Analysis - Generated on: {current_time} (GMT+8)", timestamp_format)
     
-    # Formats
-    leading_fmt = workbook.add_format({'bg_color': '#90EE90', 'border': 1})
-    improving_fmt = workbook.add_format({'bg_color': '#ADD8E6', 'border': 1})
-    weakening_fmt = workbook.add_format({'bg_color': '#FFFFE0', 'border': 1})
-    lagging_fmt = workbook.add_format({'bg_color': '#FFB6C1', 'border': 1})
-    no_data_fmt = workbook.add_format({'bg_color': '#D3D3D3', 'border': 1})
+    leading_format = workbook.add_format({'bg_color': '#90EE90', 'border': 1})
+    improving_format = workbook.add_format({'bg_color': '#ADD8E6', 'border': 1})
+    weakening_format = workbook.add_format({'bg_color': '#FFFFE0', 'border': 1})
+    lagging_format = workbook.add_format({'bg_color': '#FFB6C1', 'border': 1})
+    no_data_format = workbook.add_format({'bg_color': '#D3D3D3', 'border': 1})
     
-    leading_num = workbook.add_format({'bg_color': '#90EE90', 'num_format': '0.00', 'border': 1})
-    improving_num = workbook.add_format({'bg_color': '#ADD8E6', 'num_format': '0.00', 'border': 1})
-    weakening_num = workbook.add_format({'bg_color': '#FFFFE0', 'num_format': '0.00', 'border': 1})
-    lagging_num = workbook.add_format({'bg_color': '#FFB6C1', 'num_format': '0.00', 'border': 1})
-    no_data_num = workbook.add_format({'bg_color': '#D3D3D3', 'num_format': '0.00', 'border': 1})
+    leading_number = workbook.add_format({'bg_color': '#90EE90', 'num_format': '0.00', 'border': 1})
+    improving_number = workbook.add_format({'bg_color': '#ADD8E6', 'num_format': '0.00', 'border': 1})
+    weakening_number = workbook.add_format({'bg_color': '#FFFFE0', 'num_format': '0.00', 'border': 1})
+    lagging_number = workbook.add_format({'bg_color': '#FFB6C1', 'num_format': '0.00', 'border': 1})
+    no_data_number = workbook.add_format({'bg_color': '#D3D3D3', 'num_format': '0.00', 'border': 1})
     
-    header_fmt = workbook.add_format({'bold': True, 'bg_color': '#D3D3D3', 'border': 1})
-    ticker_fmt = workbook.add_format({'border': 1})
+    header_format = workbook.add_format({'bold': True, 'bg_color': '#D3D3D3', 'border': 1})
+    ticker_format = workbook.add_format({'border': 1})
     
-    # Apply formats
     for col in range(len(df.columns)):
-        worksheet.write(2, col, df.columns[col], header_fmt)
+        worksheet.write(2, col, df.columns[col], header_format)
     
     for row_num in range(len(df)):
-        worksheet.write(row_num + 3, 0, df.iloc[row_num]['Ticker'], ticker_fmt)
-        
-    fmt_map = {
-        'Leading': (leading_fmt, leading_num),
-        'Improving': (improving_fmt, improving_num),
-        'Weakening': (weakening_fmt, weakening_num),
-        'Lagging': (lagging_fmt, lagging_num),
-        'No Data': (no_data_fmt, no_data_num)
-    }
+        worksheet.write(row_num + 3, 0, df.iloc[row_num]['Ticker'], ticker_format)
     
     for row_num in range(len(df)):
         excel_row = row_num + 3
         weekly_q = df.iloc[row_num]['Weekly Quadrant']
         daily_q = df.iloc[row_num]['Daily Quadrant']
         
-        w_fmt, w_num = fmt_map.get(weekly_q, (no_data_fmt, no_data_num))
-        d_fmt, d_num = fmt_map.get(daily_q, (no_data_fmt, no_data_num))
+        if weekly_q == 'Leading':
+            worksheet.write(excel_row, 1, weekly_q, leading_format)
+            worksheet.write(excel_row, 2, df.iloc[row_num]['Weekly RS'], leading_number)
+            worksheet.write(excel_row, 3, df.iloc[row_num]['Weekly RM'], leading_number)
+        elif weekly_q == 'Improving':
+            worksheet.write(excel_row, 1, weekly_q, improving_format)
+            worksheet.write(excel_row, 2, df.iloc[row_num]['Weekly RS'], improving_number)
+            worksheet.write(excel_row, 3, df.iloc[row_num]['Weekly RM'], improving_number)
+        elif weekly_q == 'Weakening':
+            worksheet.write(excel_row, 1, weekly_q, weakening_format)
+            worksheet.write(excel_row, 2, df.iloc[row_num]['Weekly RS'], weakening_number)
+            worksheet.write(excel_row, 3, df.iloc[row_num]['Weekly RM'], weakening_number)
+        elif weekly_q == 'Lagging':
+            worksheet.write(excel_row, 1, weekly_q, lagging_format)
+            worksheet.write(excel_row, 2, df.iloc[row_num]['Weekly RS'], lagging_number)
+            worksheet.write(excel_row, 3, df.iloc[row_num]['Weekly RM'], lagging_number)
+        else:
+            worksheet.write(excel_row, 1, weekly_q, no_data_format)
+            worksheet.write(excel_row, 2, df.iloc[row_num]['Weekly RS'], no_data_number)
+            worksheet.write(excel_row, 3, df.iloc[row_num]['Weekly RM'], no_data_number)
         
-        worksheet.write(excel_row, 1, weekly_q, w_fmt)
-        worksheet.write(excel_row, 2, df.iloc[row_num]['Weekly RS'], w_num)
-        worksheet.write(excel_row, 3, df.iloc[row_num]['Weekly RM'], w_num)
-        worksheet.write(excel_row, 4, daily_q, d_fmt)
-        worksheet.write(excel_row, 5, df.iloc[row_num]['Daily RS'], d_num)
-        worksheet.write(excel_row, 6, df.iloc[row_num]['Daily RM'], d_num)
+        if daily_q == 'Leading':
+            worksheet.write(excel_row, 4, daily_q, leading_format)
+            worksheet.write(excel_row, 5, df.iloc[row_num]['Daily RS'], leading_number)
+            worksheet.write(excel_row, 6, df.iloc[row_num]['Daily RM'], leading_number)
+        elif daily_q == 'Improving':
+            worksheet.write(excel_row, 4, daily_q, improving_format)
+            worksheet.write(excel_row, 5, df.iloc[row_num]['Daily RS'], improving_number)
+            worksheet.write(excel_row, 6, df.iloc[row_num]['Daily RM'], improving_number)
+        elif daily_q == 'Weakening':
+            worksheet.write(excel_row, 4, daily_q, weakening_format)
+            worksheet.write(excel_row, 5, df.iloc[row_num]['Daily RS'], weakening_number)
+            worksheet.write(excel_row, 6, df.iloc[row_num]['Daily RM'], weakening_number)
+        elif daily_q == 'Lagging':
+            worksheet.write(excel_row, 4, daily_q, lagging_format)
+            worksheet.write(excel_row, 5, df.iloc[row_num]['Daily RS'], lagging_number)
+            worksheet.write(excel_row, 6, df.iloc[row_num]['Daily RM'], lagging_number)
+        else:
+            worksheet.write(excel_row, 4, daily_q, no_data_format)
+            worksheet.write(excel_row, 5, df.iloc[row_num]['Daily RS'], no_data_number)
+            worksheet.write(excel_row, 6, df.iloc[row_num]['Daily RM'], no_data_number)
     
-    # Column widths
     worksheet.set_column('A:A', 15)
     worksheet.set_column('B:B', 18)
-    worksheet.set_column('C:D', 12)
+    worksheet.set_column('C:C', 12)
+    worksheet.set_column('D:D', 15)
     worksheet.set_column('E:E', 16)
-    worksheet.set_column('F:G', 12)
+    worksheet.set_column('F:F', 12)
+    worksheet.set_column('G:G', 15)
 
 buffer.seek(0)
 st.download_button(
-    "📥 Download Excel",
+    "Download Excel",
     data=buffer,
     file_name=f"RRG_{uni}_{datetime.now():%Y%m%d_%H%M%S}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
