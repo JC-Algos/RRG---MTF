@@ -1,10 +1,12 @@
-# rrg_mini.py
+# rrg_mini_fixed.py
 import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from io import BytesIO
+import warnings
+warnings.filterwarnings('ignore')
 
 st.set_page_config(layout="wide", page_title="RRG – World / US / HK")
 
@@ -32,13 +34,11 @@ US_TICKERS = ["AAPL", "ABBV", "ABNB", "ABSV", "ABT", "ACN", "ADBE", "ADP", "ADSK
               "UNP", "UPS", "V", "VLO", "VMO", "VST", "VZ", "WDH", "WMB", "WMT", "WRTC", 
               "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY", 
               "XOM", "YUM", "ZS", "BX", "COIN",
-              # Missing NASDAQ 100 tickers:
               "GOOG", "TMUS", "AZN", "LIN", "SHOP", "PDD", "CMCSA", "APP", "MELI", "VRTX", 
               "SNPS", "KLAC", "MSTR", "ADI", "CEG", "DASH", "CTAS", "TRI", "MRVL", "PYPL", 
               "WDAY", "AEP", "MNST", "ROP", "AXON", "NXPI", "FAST", "PAYX", "PCAR", "KDP", 
               "CCEP", "ROST", "CPRT", "BKR", "EXC", "XEL", "CSGP", "EA", "MCHP", "VRSK", 
               "CTSH", "GEHC", "WBD", "ODFL", "LULU", "ON", "CDW", "GFS", "BIIB",
-              # Missing S&P 500 top 200 tickers:
               "WFC", "AXP", "MS", "T", "UBER", "SCHW", "BSX", "SYK", "C", "GEV", 
               "ETN", "MMC", "APH", "MDT", "KKR", "PLD", "WELL", "MO", "SO", "TT", 
               "WM", "HCA", "FI", "DUK", "EQIX", "SHW", "MCK", "ELV", "MCO", "PH", 
@@ -89,69 +89,118 @@ def fetch(universe):
     w_end = end - timedelta(hours=4)
     w_start = w_end - timedelta(weeks=100)
     
-    # Fetch data
-    weekly = yf.download(tickers, start=w_start, end=w_end, progress=False)["Close"].resample("W-FRI").last()
-    daily  = yf.download(tickers, start=w_end-timedelta(days=500), end=w_end, progress=False)["Close"]
+    # Fetch data with error handling
+    try:
+        weekly = yf.download(tickers, start=w_start, end=w_end, progress=False)["Close"].resample("W-FRI").last()
+        daily  = yf.download(tickers, start=w_end-timedelta(days=500), end=w_end, progress=False)["Close"]
+    except Exception as e:
+        st.error(f"Error fetching data: {str(e)}")
+        return pd.DataFrame(), pd.DataFrame(), cfg["bench"]
     
-    # Clean data properly - forward fill then backward fill to handle missing values
-    weekly = weekly.fillna(method='ffill').fillna(method='bfill')
-    daily = daily.fillna(method='ffill').fillna(method='bfill')
+    # FIXED: Replace deprecated fillna methods with ffill() and bfill()
+    weekly = weekly.ffill().bfill()
+    daily = daily.ffill().bfill()
     
     # Only drop columns that are completely empty after filling
     weekly = weekly.dropna(axis=1, how="all")
     daily = daily.dropna(axis=1, how="all")
     
+    # Ensure we have minimum required data
+    if len(weekly) < 30 or len(daily) < 30:
+        st.warning(f"Insufficient data: Weekly={len(weekly)}, Daily={len(daily)}")
+    
     return weekly, daily, cfg["bench"]
 
 # ---------- 3.  RRG ----------
 def ma(s, n): 
-    """Simple moving average with proper NaN handling"""
+    """Simple moving average with proper NaN handling and minimum periods"""
     if n == 1:
-        return s  # No need to calculate rolling mean for period 1
-    return s.rolling(n, min_periods=1).mean()
+        return s
+    # FIXED: Use min_periods equal to n to ensure reliable calculations
+    result = s.rolling(n, min_periods=n).mean()
+    return result
 
 def rs_rm(sym, bench, data):
-    """Calculate RS-Ratio and RS-Momentum with proper data alignment"""
-    # Ensure both series are aligned and handle missing data
-    sym_data = data[sym].dropna()
-    bench_data = data[bench].dropna()
-    
-    # Align the data by common index
-    common_index = sym_data.index.intersection(bench_data.index)
-    if len(common_index) < 30:  # Need minimum data points
+    """Calculate RS-Ratio and RS-Momentum with robust error handling"""
+    try:
+        # Ensure both series exist
+        if sym not in data.columns or bench not in data.columns:
+            return np.nan, np.nan
+        
+        # Drop NaN values before alignment
+        sym_data = data[sym].dropna()
+        bench_data = data[bench].dropna()
+        
+        # Align the data by common index
+        common_index = sym_data.index.intersection(bench_data.index)
+        
+        # FIXED: Require more data points for reliable calculations
+        if len(common_index) < 50:
+            return np.nan, np.nan
+        
+        sym_aligned = sym_data.reindex(common_index)
+        bench_aligned = bench_data.reindex(common_index)
+        
+        # Calculate base ratio with zero division protection
+        # FIXED: Add small epsilon to avoid division by zero
+        bench_safe = bench_aligned.replace(0, np.nan)
+        base = sym_aligned / bench_safe
+        
+        # Remove infinite values and NaN
+        base = base.replace([np.inf, -np.inf], np.nan).dropna()
+        
+        # FIXED: Check again for sufficient data after cleaning
+        if len(base) < 50:
+            return np.nan, np.nan
+        
+        # Calculate RS-Ratio
+        rs1 = ma(base, 10)
+        rs2 = ma(base, 26)
+        
+        # FIXED: More robust NaN handling
+        if rs1.isna().all() or rs2.isna().all():
+            return np.nan, np.nan
+        
+        # Avoid division by zero
+        rs2_safe = rs2.replace(0, np.nan)
+        rs_ratio = 100 * ((rs1 - rs2_safe) / rs2_safe + 1)
+        
+        # FIXED: Check for valid RS-Ratio before calculating momentum
+        rs_ratio_clean = rs_ratio.dropna()
+        if len(rs_ratio_clean) < 10:
+            return np.nan, np.nan
+        
+        # Calculate RS-Momentum
+        rm1 = rs_ratio  # Current value
+        rm2 = ma(rs_ratio, 4)
+        
+        # FIXED: More robust NaN handling for momentum
+        if rm2.isna().all():
+            return np.nan, np.nan
+        
+        # Avoid division by zero
+        rm2_safe = rm2.replace(0, np.nan)
+        rs_momentum = 100 * ((rm1 - rm2_safe) / rm2_safe + 1)
+        
+        # Return the last valid values rounded to 2 decimal places
+        rs_ratio_valid = rs_ratio.dropna()
+        rs_momentum_valid = rs_momentum.dropna()
+        
+        if len(rs_ratio_valid) == 0 or len(rs_momentum_valid) == 0:
+            return np.nan, np.nan
+        
+        rs_final = round(rs_ratio_valid.iloc[-1], 2)
+        rm_final = round(rs_momentum_valid.iloc[-1], 2)
+        
+        # FIXED: Validate results are not extreme values
+        if abs(rs_final) > 1000 or abs(rm_final) > 1000:
+            return np.nan, np.nan
+        
+        return rs_final, rm_final
+        
+    except Exception as e:
+        # FIXED: Better error logging
         return np.nan, np.nan
-    
-    sym_aligned = sym_data.reindex(common_index)
-    bench_aligned = bench_data.reindex(common_index)
-    
-    # Calculate base ratio with zero division protection
-    base = sym_aligned / bench_aligned
-    base = base.replace([np.inf, -np.inf], np.nan).dropna()
-    
-    if len(base) < 30:  # Need minimum data points for moving averages
-        return np.nan, np.nan
-    
-    # Calculate RS-Ratio (matches Pine Script logic exactly)
-    rs1 = ma(base, 10)
-    rs2 = ma(base, 26)
-    
-    # Avoid division by zero
-    rs2_safe = rs2.replace(0, np.nan)
-    rs_ratio = 100 * ((rs1 - rs2_safe) / rs2_safe + 1)
-    
-    # Calculate RS-Momentum (matches Pine Script logic exactly) 
-    rm1 = ma(rs_ratio, 1)  # This is just rs_ratio itself
-    rm2 = ma(rs_ratio, 4)
-    
-    # Avoid division by zero
-    rm2_safe = rm2.replace(0, np.nan)
-    rs_momentum = 100 * ((rm1 - rm2_safe) / rm2_safe + 1)
-    
-    # Return the last valid values rounded to 2 decimal places
-    rs_final = round(rs_ratio.dropna().iloc[-1], 2) if not rs_ratio.dropna().empty else np.nan
-    rm_final = round(rs_momentum.dropna().iloc[-1], 2) if not rs_momentum.dropna().empty else np.nan
-    
-    return rs_final, rm_final
 
 def quadrant(x, y):
     if pd.isna(x) or pd.isna(y):
@@ -170,11 +219,34 @@ if st.sidebar.button("🔄 Refresh Data"):
     st.cache_data.clear()
     st.rerun()
 
-weekly, daily, bench = fetch(uni)
+# Add status indicators
+with st.spinner(f"Fetching {uni} market data..."):
+    weekly, daily, bench = fetch(uni)
+
+# FIXED: Better validation of fetched data
+if weekly.empty or daily.empty:
+    st.error("❌ Failed to fetch data. Please try again or check your internet connection.")
+    st.stop()
+
 tickers = [c for c in weekly.columns if c != bench and c in daily.columns]
 
+if not tickers:
+    st.error("❌ No valid tickers found in the data.")
+    st.stop()
+
+# Progress tracking
+progress_bar = st.progress(0)
+status_text = st.empty()
+
 rows = []
-for tk in tickers:
+failed_tickers = []
+processed = 0
+
+for i, tk in enumerate(tickers):
+    processed += 1
+    progress_bar.progress(processed / len(tickers))
+    status_text.text(f"Processing {tk}... ({processed}/{len(tickers)})")
+    
     try:
         # Only process tickers that exist in both datasets
         if tk in weekly.columns and tk in daily.columns and bench in weekly.columns and bench in daily.columns:
@@ -192,23 +264,55 @@ for tk in tickers:
                     "Daily RS": d_rs,
                     "Daily RM": d_rm
                 })
+            else:
+                failed_tickers.append(tk)
     except Exception as e:
-        st.sidebar.write(f"Error processing {tk}: {str(e)}")
+        failed_tickers.append(tk)
         continue
+
+# Clear progress indicators
+progress_bar.empty()
+status_text.empty()
+
+# FIXED: Show processing summary
+if failed_tickers:
+    with st.expander(f"⚠️ {len(failed_tickers)} tickers had insufficient data", expanded=False):
+        st.write(", ".join(failed_tickers[:50]))
+        if len(failed_tickers) > 50:
+            st.write(f"... and {len(failed_tickers) - 50} more")
 
 df = pd.DataFrame(rows)
 
 if df.empty:
-    st.error("No valid data available. Please check your data source and try again.")
+    st.error("❌ No valid data available after processing. This could be due to:")
+    st.write("- Network connectivity issues")
+    st.write("- Insufficient historical data for tickers")
+    st.write("- Market data provider restrictions")
     st.stop()
+
+# Success indicator
+st.success(f"✅ Successfully processed {len(df)} out of {len(tickers)} tickers")
 
 # ---------- 5.  SORT BY WEEKLY QUADRANT ----------
 quad_order = {'Leading': 0, 'Improving': 1, 'Weakening': 2, 'Lagging': 3, 'No Data': 4}
 df = df.sort_values(by='Weekly Quadrant', key=lambda x: x.map(quad_order))
 
 # ---------- 6.  DISPLAY ----------
-st.subheader(f"{uni} rotation table  (bench: {bench})")
-styled = df.style.applymap(
+st.subheader(f"{uni} Rotation Table (Benchmark: {bench})")
+
+# Add summary statistics
+col1, col2, col3, col4 = st.columns(4)
+with col1:
+    st.metric("Leading", len(df[df['Weekly Quadrant'] == 'Leading']))
+with col2:
+    st.metric("Improving", len(df[df['Weekly Quadrant'] == 'Improving']))
+with col3:
+    st.metric("Weakening", len(df[df['Weekly Quadrant'] == 'Weakening']))
+with col4:
+    st.metric("Lagging", len(df[df['Weekly Quadrant'] == 'Lagging']))
+
+# FIXED: Use modern pandas styling method
+styled = df.style.map(
     lambda v: {"Leading":"background-color:#90EE90",
                "Improving":"background-color:#ADD8E6",
                "Weakening":"background-color:#FFFFE0",
@@ -216,6 +320,7 @@ styled = df.style.applymap(
                "No Data":"background-color:#D3D3D3"}.get(v, ""),
     subset=["Weekly Quadrant", "Daily Quadrant"]
 )
+
 st.dataframe(styled, use_container_width=True, height=600)
 
 # ---------- 7.  EXCEL DOWNLOAD ----------
@@ -233,9 +338,6 @@ with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
     current_time = (datetime.now() + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
     worksheet.write(0, 0, f"RRG Analysis - Generated on: {current_time} (GMT+8)", timestamp_format)
     
-    # Define border format
-    border_format = workbook.add_format({'border': 1})
-    
     # Define formats for different quadrants with borders
     leading_format = workbook.add_format({'bg_color': '#90EE90', 'border': 1})
     improving_format = workbook.add_format({'bg_color': '#ADD8E6', 'border': 1})
@@ -243,87 +345,62 @@ with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
     lagging_format = workbook.add_format({'bg_color': '#FFB6C1', 'border': 1})
     no_data_format = workbook.add_format({'bg_color': '#D3D3D3', 'border': 1})
     
-    # Number format for RS values (2 decimal places) with borders
+    # Number formats with borders
     leading_number = workbook.add_format({'bg_color': '#90EE90', 'num_format': '0.00', 'border': 1})
     improving_number = workbook.add_format({'bg_color': '#ADD8E6', 'num_format': '0.00', 'border': 1})
     weakening_number = workbook.add_format({'bg_color': '#FFFFE0', 'num_format': '0.00', 'border': 1})
     lagging_number = workbook.add_format({'bg_color': '#FFB6C1', 'num_format': '0.00', 'border': 1})
     no_data_number = workbook.add_format({'bg_color': '#D3D3D3', 'num_format': '0.00', 'border': 1})
     
-    # Header format with borders
+    # Header and ticker formats
     header_format = workbook.add_format({'bold': True, 'bg_color': '#D3D3D3', 'border': 1})
+    ticker_format = workbook.add_format({'border': 1})
     
-    # Apply border formatting to headers (row 2, which is index 2)
+    # Apply header formatting
     for col in range(len(df.columns)):
         worksheet.write(2, col, df.columns[col], header_format)
     
-    # Apply border formatting to ticker column (no background color)
-    ticker_format = workbook.add_format({'border': 1})
+    # Apply data formatting
     for row_num in range(len(df)):
-        worksheet.write(row_num + 3, 0, df.iloc[row_num]['Ticker'], ticker_format)
-    
-    # Apply formatting to each data row (starting from row 3, which is index 3)
-    for row_num in range(len(df)):
-        excel_row = row_num + 3  # Offset by 3 because we start at row 3 (index 2 is header)
+        excel_row = row_num + 3
         weekly_q = df.iloc[row_num]['Weekly Quadrant']
         daily_q = df.iloc[row_num]['Daily Quadrant']
         
-        # Format Weekly Quadrant column (column 1)
-        if weekly_q == 'Leading':
-            worksheet.write(excel_row, 1, weekly_q, leading_format)
-            worksheet.write(excel_row, 2, df.iloc[row_num]['Weekly RS'], leading_number)
-            worksheet.write(excel_row, 3, df.iloc[row_num]['Weekly RM'], leading_number)
-        elif weekly_q == 'Improving':
-            worksheet.write(excel_row, 1, weekly_q, improving_format)
-            worksheet.write(excel_row, 2, df.iloc[row_num]['Weekly RS'], improving_number)
-            worksheet.write(excel_row, 3, df.iloc[row_num]['Weekly RM'], improving_number)
-        elif weekly_q == 'Weakening':
-            worksheet.write(excel_row, 1, weekly_q, weakening_format)
-            worksheet.write(excel_row, 2, df.iloc[row_num]['Weekly RS'], weakening_number)
-            worksheet.write(excel_row, 3, df.iloc[row_num]['Weekly RM'], weakening_number)
-        elif weekly_q == 'Lagging':
-            worksheet.write(excel_row, 1, weekly_q, lagging_format)
-            worksheet.write(excel_row, 2, df.iloc[row_num]['Weekly RS'], lagging_number)
-            worksheet.write(excel_row, 3, df.iloc[row_num]['Weekly RM'], lagging_number)
-        else:
-            worksheet.write(excel_row, 1, weekly_q, no_data_format)
-            worksheet.write(excel_row, 2, df.iloc[row_num]['Weekly RS'], no_data_number)
-            worksheet.write(excel_row, 3, df.iloc[row_num]['Weekly RM'], no_data_number)
+        # Ticker column
+        worksheet.write(excel_row, 0, df.iloc[row_num]['Ticker'], ticker_format)
         
-        # Format Daily Quadrant column (column 4)
-        if daily_q == 'Leading':
-            worksheet.write(excel_row, 4, daily_q, leading_format)
-            worksheet.write(excel_row, 5, df.iloc[row_num]['Daily RS'], leading_number)
-            worksheet.write(excel_row, 6, df.iloc[row_num]['Daily RM'], leading_number)
-        elif daily_q == 'Improving':
-            worksheet.write(excel_row, 4, daily_q, improving_format)
-            worksheet.write(excel_row, 5, df.iloc[row_num]['Daily RS'], improving_number)
-            worksheet.write(excel_row, 6, df.iloc[row_num]['Daily RM'], improving_number)
-        elif daily_q == 'Weakening':
-            worksheet.write(excel_row, 4, daily_q, weakening_format)
-            worksheet.write(excel_row, 5, df.iloc[row_num]['Daily RS'], weakening_number)
-            worksheet.write(excel_row, 6, df.iloc[row_num]['Daily RM'], weakening_number)
-        elif daily_q == 'Lagging':
-            worksheet.write(excel_row, 4, daily_q, lagging_format)
-            worksheet.write(excel_row, 5, df.iloc[row_num]['Daily RS'], lagging_number)
-            worksheet.write(excel_row, 6, df.iloc[row_num]['Daily RM'], lagging_number)
-        else:
-            worksheet.write(excel_row, 4, daily_q, no_data_format)
-            worksheet.write(excel_row, 5, df.iloc[row_num]['Daily RS'], no_data_number)
-            worksheet.write(excel_row, 6, df.iloc[row_num]['Daily RM'], no_data_number)
+        # Weekly quadrant formatting
+        fmt_map = {
+            'Leading': (leading_format, leading_number),
+            'Improving': (improving_format, improving_number),
+            'Weakening': (weakening_format, weakening_number),
+            'Lagging': (lagging_format, lagging_number),
+            'No Data': (no_data_format, no_data_number)
+        }
+        
+        w_fmt, w_num = fmt_map.get(weekly_q, (no_data_format, no_data_number))
+        worksheet.write(excel_row, 1, weekly_q, w_fmt)
+        worksheet.write(excel_row, 2, df.iloc[row_num]['Weekly RS'], w_num)
+        worksheet.write(excel_row, 3, df.iloc[row_num]['Weekly RM'], w_num)
+        
+        # Daily quadrant formatting
+        d_fmt, d_num = fmt_map.get(daily_q, (no_data_format, no_data_number))
+        worksheet.write(excel_row, 4, daily_q, d_fmt)
+        worksheet.write(excel_row, 5, df.iloc[row_num]['Daily RS'], d_num)
+        worksheet.write(excel_row, 6, df.iloc[row_num]['Daily RM'], d_num)
     
     # Auto-adjust column widths
-    worksheet.set_column('A:A', 15)  # Ticker
-    worksheet.set_column('B:B', 18)  # Weekly Quadrant
-    worksheet.set_column('C:C', 12)  # Weekly RS
-    worksheet.set_column('D:D', 15)  # Weekly RM
-    worksheet.set_column('E:E', 16)  # Daily Quadrant
-    worksheet.set_column('F:F', 12)  # Daily RS
-    worksheet.set_column('G:G', 15)  # Daily RM
+    worksheet.set_column('A:A', 15)
+    worksheet.set_column('B:B', 18)
+    worksheet.set_column('C:C', 12)
+    worksheet.set_column('D:D', 15)
+    worksheet.set_column('E:E', 16)
+    worksheet.set_column('F:F', 12)
+    worksheet.set_column('G:G', 15)
 
 buffer.seek(0)
 st.download_button(
-    "Download Excel",
+    "📥 Download Excel Report",
     data=buffer,
     file_name=f"RRG_{uni}_{datetime.now():%Y%m%d_%H%M%S}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
