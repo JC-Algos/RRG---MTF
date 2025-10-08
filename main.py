@@ -2,12 +2,11 @@ import streamlit as st
 import os
 import sys
 
-# CRITICAL FIX: Must disable multitasking BEFORE importing yfinance
-os.environ['YFINANCE_MULTITHREADING'] = '0'
-
-# Monkeypatch multitasking to be non-threaded
+# CRITICAL: Completely disable threading before any imports
 import multitasking
+multitasking.CPU_COUNT = 1
 multitasking.set_max_threads(1)
+multitasking.set_engine(None)
 
 import yfinance as yf
 import pandas as pd
@@ -90,11 +89,11 @@ UNIVERSE_MAP = {
 }
 
 # ---------- 2.  DATA ----------
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch(universe):
     cfg = UNIVERSE_MAP[universe]
     bench = cfg["bench"]
-    tickers = [bench] + cfg["tickers"][:50]  # Limit to 50 tickers for faster testing
+    tickers = [bench] + cfg["tickers"]
     end = datetime.today()
     w_end = end - timedelta(hours=4)
     w_start = w_end - timedelta(weeks=100)
@@ -102,26 +101,43 @@ def fetch(universe):
     weekly_data = {}
     daily_data = {}
     
-    # Download one ticker at a time to avoid multithreading
-    for ticker in tickers:
+    # Create a progress placeholder
+    progress_text = st.empty()
+    progress_bar = st.progress(0)
+    
+    # Download one ticker at a time
+    total = len(tickers)
+    for idx, ticker in enumerate(tickers):
+        progress_bar.progress((idx + 1) / total)
+        progress_text.text(f"Loading {ticker}... ({idx + 1}/{total})")
+        
         try:
-            # Single ticker download - no multithreading
-            data_w = yf.Ticker(ticker).history(start=w_start, end=w_end, interval='1d')
-            if not data_w.empty and 'Close' in data_w.columns:
-                weekly_data[ticker] = data_w['Close']
+            # Create Ticker object
+            tick = yf.Ticker(ticker)
             
-            data_d = yf.Ticker(ticker).history(start=w_end-timedelta(days=500), end=w_end, interval='1d')
-            if not data_d.empty and 'Close' in data_d.columns:
-                daily_data[ticker] = data_d['Close']
-        except:
+            # Get historical data using history() method
+            w_hist = tick.history(start=w_start, end=w_end, auto_adjust=True, actions=False)
+            if not w_hist.empty and 'Close' in w_hist.columns:
+                weekly_data[ticker] = w_hist['Close']
+            
+            d_hist = tick.history(start=w_end-timedelta(days=500), end=w_end, auto_adjust=True, actions=False)
+            if not d_hist.empty and 'Close' in d_hist.columns:
+                daily_data[ticker] = d_hist['Close']
+        except Exception as e:
+            # Skip failed tickers silently
             continue
+    
+    # Clear progress indicators
+    progress_bar.empty()
+    progress_text.empty()
     
     # Combine into DataFrames
     weekly = pd.DataFrame(weekly_data)
     daily = pd.DataFrame(daily_data)
     
     # Resample weekly
-    weekly = weekly.resample("W-FRI").last()
+    if not weekly.empty:
+        weekly = weekly.resample("W-FRI").last()
     
     # Clean data properly
     weekly = weekly.ffill().bfill()
@@ -200,9 +216,8 @@ if st.sidebar.button("🔄 Refresh Data"):
     st.cache_data.clear()
     st.rerun()
 
-# Show loading message
-with st.spinner(f'Fetching {uni} data... This may take a moment.'):
-    weekly, daily, bench = fetch(uni)
+# Fetch data (progress shown inside fetch function)
+weekly, daily, bench = fetch(uni)
 
 # Check if data loaded successfully
 if weekly.empty or daily.empty:
