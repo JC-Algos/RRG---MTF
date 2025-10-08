@@ -4,6 +4,10 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from io import BytesIO
+import os
+
+# CRITICAL FIX: Disable yfinance multithreading to prevent Streamlit Cloud errors
+os.environ['YFINANCE_MULTITHREADING'] = '0'
 
 st.set_page_config(layout="wide", page_title="RRG – World / US / HK")
 
@@ -88,11 +92,35 @@ def fetch(universe):
     w_end = end - timedelta(hours=4)
     w_start = w_end - timedelta(weeks=100)
     
-    # Fetch data
-    weekly = yf.download(tickers, start=w_start, end=w_end, progress=False)["Close"].resample("W-FRI").last()
-    daily  = yf.download(tickers, start=w_end-timedelta(days=500), end=w_end, progress=False)["Close"]
+    # Download data one ticker at a time to avoid threading issues
+    weekly_data = {}
+    daily_data = {}
     
-    # Clean data properly - ONLY FIX: use ffill()/bfill() instead of deprecated fillna(method=...)
+    for i, ticker in enumerate(tickers):
+        try:
+            # Download weekly
+            w_df = yf.download(ticker, start=w_start, end=w_end, progress=False, threads=False)
+            if not w_df.empty:
+                if 'Close' in w_df.columns:
+                    weekly_data[ticker] = w_df['Close']
+                else:
+                    weekly_data[ticker] = w_df.iloc[:, 0] if len(w_df.columns) > 0 else w_df
+            
+            # Download daily
+            d_df = yf.download(ticker, start=w_end-timedelta(days=500), end=w_end, progress=False, threads=False)
+            if not d_df.empty:
+                if 'Close' in d_df.columns:
+                    daily_data[ticker] = d_df['Close']
+                else:
+                    daily_data[ticker] = d_df.iloc[:, 0] if len(d_df.columns) > 0 else d_df
+        except:
+            continue
+    
+    # Combine into DataFrames
+    weekly = pd.DataFrame(weekly_data).resample("W-FRI").last()
+    daily = pd.DataFrame(daily_data)
+    
+    # Clean data properly
     weekly = weekly.ffill().bfill()
     daily = daily.ffill().bfill()
     
@@ -169,7 +197,9 @@ if st.sidebar.button("🔄 Refresh Data"):
     st.cache_data.clear()
     st.rerun()
 
-weekly, daily, bench = fetch(uni)
+# Show loading message
+with st.spinner(f'Fetching {uni} data... This may take 1-2 minutes.'):
+    weekly, daily, bench = fetch(uni)
 tickers = [c for c in weekly.columns if c != bench and c in daily.columns]
 
 rows = []
