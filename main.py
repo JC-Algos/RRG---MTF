@@ -1,13 +1,5 @@
+# rrg_mini.py
 import streamlit as st
-import os
-import sys
-
-# CRITICAL: Completely disable threading before any imports
-import multitasking
-multitasking.CPU_COUNT = 1
-multitasking.set_max_threads(1)
-multitasking.set_engine(None)
-
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -89,65 +81,27 @@ UNIVERSE_MAP = {
 }
 
 # ---------- 2.  DATA ----------
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=3600)
 def fetch(universe):
     cfg = UNIVERSE_MAP[universe]
-    bench = cfg["bench"]
-    tickers = [bench] + cfg["tickers"]
+    tickers = [cfg["bench"]] + cfg["tickers"]
     end = datetime.today()
     w_end = end - timedelta(hours=4)
     w_start = w_end - timedelta(weeks=100)
     
-    weekly_data = {}
-    daily_data = {}
+    # Fetch data
+    weekly = yf.download(tickers, start=w_start, end=w_end, progress=False)["Close"].resample("W-FRI").last()
+    daily  = yf.download(tickers, start=w_end-timedelta(days=500), end=w_end, progress=False)["Close"]
     
-    # Create a progress placeholder
-    progress_text = st.empty()
-    progress_bar = st.progress(0)
-    
-    # Download one ticker at a time
-    total = len(tickers)
-    for idx, ticker in enumerate(tickers):
-        progress_bar.progress((idx + 1) / total)
-        progress_text.text(f"Loading {ticker}... ({idx + 1}/{total})")
-        
-        try:
-            # Create Ticker object
-            tick = yf.Ticker(ticker)
-            
-            # Get historical data using history() method
-            w_hist = tick.history(start=w_start, end=w_end, auto_adjust=True, actions=False)
-            if not w_hist.empty and 'Close' in w_hist.columns:
-                weekly_data[ticker] = w_hist['Close']
-            
-            d_hist = tick.history(start=w_end-timedelta(days=500), end=w_end, auto_adjust=True, actions=False)
-            if not d_hist.empty and 'Close' in d_hist.columns:
-                daily_data[ticker] = d_hist['Close']
-        except Exception as e:
-            # Skip failed tickers silently
-            continue
-    
-    # Clear progress indicators
-    progress_bar.empty()
-    progress_text.empty()
-    
-    # Combine into DataFrames
-    weekly = pd.DataFrame(weekly_data)
-    daily = pd.DataFrame(daily_data)
-    
-    # Resample weekly
-    if not weekly.empty:
-        weekly = weekly.resample("W-FRI").last()
-    
-    # Clean data properly
-    weekly = weekly.ffill().bfill()
-    daily = daily.ffill().bfill()
+    # Clean data properly - forward fill then backward fill to handle missing values
+    weekly = weekly.fillna(method='ffill').fillna(method='bfill')
+    daily = daily.fillna(method='ffill').fillna(method='bfill')
     
     # Only drop columns that are completely empty after filling
     weekly = weekly.dropna(axis=1, how="all")
     daily = daily.dropna(axis=1, how="all")
     
-    return weekly, daily, bench
+    return weekly, daily, cfg["bench"]
 
 # ---------- 3.  RRG ----------
 def ma(s, n): 
@@ -216,14 +170,7 @@ if st.sidebar.button("🔄 Refresh Data"):
     st.cache_data.clear()
     st.rerun()
 
-# Show loading message
-with st.spinner(f'Fetching {uni} data... This may take a moment.'):
-    weekly, daily, bench = fetch(uni)
-
-# Check if data loaded successfully
-if weekly.empty or daily.empty:
-    st.error("Failed to load data. Please try refreshing the page or selecting a different universe.")
-    st.stop()
+weekly, daily, bench = fetch(uni)
 tickers = [c for c in weekly.columns if c != bench and c in daily.columns]
 
 rows = []
@@ -261,9 +208,7 @@ df = df.sort_values(by='Weekly Quadrant', key=lambda x: x.map(quad_order))
 
 # ---------- 6.  DISPLAY ----------
 st.subheader(f"{uni} rotation table  (bench: {bench})")
-
-# ONLY FIX: use map() instead of deprecated applymap()
-styled = df.style.map(
+styled = df.style.applymap(
     lambda v: {"Leading":"background-color:#90EE90",
                "Improving":"background-color:#ADD8E6",
                "Weakening":"background-color:#FFFFE0",
