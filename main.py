@@ -90,8 +90,28 @@ def fetch(universe):
     
     try:
         # Fetch data with threading disabled to avoid multithreading issues
-        weekly = yf.download(tickers, start=w_start, end=w_end, progress=False, threads=False)["Close"].resample("W-FRI").last()
-        daily  = yf.download(tickers, start=w_end-timedelta(days=500), end=w_end, progress=False, threads=False)["Close"]
+        weekly_raw = yf.download(tickers, start=w_start, end=w_end, progress=False, threads=False)
+        daily_raw = yf.download(tickers, start=w_end-timedelta(days=500), end=w_end, progress=False, threads=False)
+        
+        # Handle both single ticker and multiple ticker cases
+        if "Close" in weekly_raw.columns:
+            weekly = weekly_raw["Close"]
+        else:
+            weekly = weekly_raw
+        
+        if "Close" in daily_raw.columns:
+            daily = daily_raw["Close"]
+        else:
+            daily = daily_raw
+            
+        # Ensure we have DataFrames, not Series
+        if isinstance(weekly, pd.Series):
+            weekly = weekly.to_frame(name=tickers[0])
+        if isinstance(daily, pd.Series):
+            daily = daily.to_frame(name=tickers[0])
+        
+        # Resample weekly data
+        weekly = weekly.resample("W-FRI").last()
         
         # Clean data properly - use ffill() and bfill() instead of deprecated fillna(method=...)
         weekly = weekly.ffill().bfill()
@@ -100,6 +120,10 @@ def fetch(universe):
         # Only drop columns that are completely empty after filling
         weekly = weekly.dropna(axis=1, how="all")
         daily = daily.dropna(axis=1, how="all")
+        
+        # Verify benchmark exists
+        if cfg["bench"] not in weekly.columns or cfg["bench"] not in daily.columns:
+            raise ValueError(f"Benchmark {cfg['bench']} not found in downloaded data")
         
         return weekly, daily, cfg["bench"]
     except Exception as e:
@@ -173,8 +197,22 @@ if st.sidebar.button("🔄 Refresh Data"):
     st.cache_data.clear()
     st.rerun()
 
-weekly, daily, bench = fetch(uni)
+try:
+    with st.spinner(f'Fetching {uni} data...'):
+        weekly, daily, bench = fetch(uni)
+except Exception as e:
+    st.error(f"Failed to fetch data: {str(e)}")
+    st.stop()
+
+if weekly is None or daily is None or weekly.empty or daily.empty:
+    st.error("No data available. Please try refreshing.")
+    st.stop()
+
 tickers = [c for c in weekly.columns if c != bench and c in daily.columns]
+
+if not tickers:
+    st.error("No valid tickers found. Please check your data source.")
+    st.stop()
 
 rows = []
 for tk in tickers:
@@ -196,7 +234,7 @@ for tk in tickers:
                     "Daily RM": d_rm
                 })
     except Exception as e:
-        st.sidebar.write(f"Error processing {tk}: {str(e)}")
+        # Log errors but continue processing other tickers
         continue
 
 df = pd.DataFrame(rows)
@@ -205,12 +243,26 @@ if df.empty:
     st.error("No valid data available. Please check your data source and try again.")
     st.stop()
 
+st.sidebar.success(f"✅ Processed {len(df)} tickers successfully")
+
 # ---------- 5.  SORT BY WEEKLY QUADRANT ----------
 quad_order = {'Leading': 0, 'Improving': 1, 'Weakening': 2, 'Lagging': 3, 'No Data': 4}
 df = df.sort_values(by='Weekly Quadrant', key=lambda x: x.map(quad_order))
 
 # ---------- 6.  DISPLAY ----------
 st.subheader(f"{uni} rotation table  (bench: {bench})")
+
+# Show quadrant distribution summary
+col1, col2, col3, col4 = st.columns(4)
+quad_counts = df['Weekly Quadrant'].value_counts()
+with col1:
+    st.metric("Leading", quad_counts.get('Leading', 0))
+with col2:
+    st.metric("Improving", quad_counts.get('Improving', 0))
+with col3:
+    st.metric("Weakening", quad_counts.get('Weakening', 0))
+with col4:
+    st.metric("Lagging", quad_counts.get('Lagging', 0))
 
 # Use map instead of applymap (deprecated in pandas 2.1+)
 def style_quadrant(v):
